@@ -1,0 +1,8 @@
+{"sample_id": "edge_01", "type": "mixed_lang", "text": "DeepSeek与OpenAI的架构师兼CEO张伟在GitHub发布了v2.5多任务抽取模型。"}
+{"sample_id": "edge_02", "type": "numeric_units", "text": "项目一期投资达1,250.80万元人民币，同比激增34.5%，涉及超200台精密服务器。"}
+{"sample_id": "edge_03", "type": "emoji_symbols", "text": "📦 订单#88921已成功送达！🎉 客户李小龙签名确认验收无误。"}
+{"sample_id": "edge_04", "type": "crlf_spacing", "text": "首长\r\n萧战\r\n率领\t\t萧家\n子弟迎战云岚宗！\r\n"}
+{"sample_id": "edge_05", "type": "nested_long_org", "text": "国家超级计算无锡中心先进异构众核处理器联合重点实验室主任陈教授在会上作报告。"}
+{"sample_id": "edge_06", "type": "empty_negative", "text": "今天的天气晴空万里，微风拂过湖面泛起阵阵涟漪，没有任何特别的事情发生。"}
+{"sample_id": "edge_07", "type": "identical_name_distinction", "text": "大萧炎与小萧炎同台竞技，大萧炎使用的是玄重尺，而小萧炎使用的是普通铁剑。"}
+{"sample_id": "edge_08", "type": "extreme_punctuation", "text": "‘什么？！纳兰嫣然……她……她竟然真的敢单方面宣布退婚？！’萧战拍案怒斥！！！"}

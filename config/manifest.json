@@ -1,0 +1,69 @@
+{
+  "benchmark_name": "GLiNER2.5 vs UIE 16GB Structured IE Evaluation",
+  "version": "1.0.0",
+  "created_at_utc": "2026-09-07T03:30:00Z",
+  "author": "Pi",
+  "design_reference": "GLINER25_ACTIONS_FULL_EVAL_16G",
+  "target_environment": {
+    "memory_tier": "16GB Physical RAM",
+    "swap_policy": "NO_SWAP_REQUIRED",
+    "runner_baseline": "GitHub-hosted ubuntu-24.04 (4 vCPU, 16GB RAM, ~14GB disk)",
+    "container_recommendation": {
+      "memory_max": "4GiB",
+      "memory_swap_max": "0B",
+      "cpu_quota": "2.0-4.0"
+    }
+  },
+  "models": [
+    {
+      "model_id": "gliner2.5-multi-v1",
+      "hub_id": "fastino/gliner2.5-multi-v1",
+      "architecture": "GLiNER2 Boundary",
+      "dtype": "torch.float32",
+      "device": "cpu",
+      "word_splitter": "char",
+      "weights_size_bytes": 1149461028,
+      "parameter_count": 287355159,
+      "configs_tested": ["G0", "G1", "G2", "G3", "G4a", "G4b", "G5"]
+    },
+    {
+      "model_id": "uie-medium",
+      "hub_id": "Casually/uie-medium",
+      "architecture": "UIE (Universal Information Extraction)",
+      "dtype": "torch.float32",
+      "device": "cpu",
+      "batch_size": 1,
+      "weights_size_bytes": 301729288,
+      "parameter_count": 75429122,
+      "configs_tested": ["hierarchical_schema_batch1"]
+    },
+    {
+      "model_id": "uie-mini",
+      "hub_id": "Casually/uie-mini",
+      "architecture": "UIE (Universal Information Extraction)",
+      "dtype": "torch.float32",
+      "device": "cpu",
+      "batch_size": 1,
+      "weights_size_bytes": 107813736,
+      "parameter_count": 26950274,
+      "configs_tested": ["hierarchical_schema_batch1"]
+    },
+    {
+      "model_id": "rule_baseline_b0",
+      "hub_id": "local",
+      "architecture": "Dictionary & Heuristic Regex",
+      "dtype": "none",
+      "device": "cpu",
+      "configs_tested": ["B0"]
+    }
+  ],
+  "feature_matrix": {
+    "G0": "Baseline char mode + entity descriptions + basic relation head (raw output)",
+    "G1": "G0 + Unified external validator (self-loop filtering, endpoint type checking, deduplication)",
+    "G2": "JointIE constrained joint decoding (neural candidate lattice + graph constraints)",
+    "G3": "Natural records mode (anchor instance binding, field pairing, cardinality enforcement)",
+    "G4a": "Mention/span attributes (modality / polarity scope binding on triggers)",
+    "G4b": "Constrained classification (cross-task implications & mutual exclusions)",
+    "G5": "Full pipeline: JointIE + Natural records + Span attributes + Unified validation"
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "target_system_profile": {
+    "organization": "信创目标环境验收配置",
+    "hardware": {
+      "arch": "x86_64 | aarch64 | loongarch64",
+      "cpu_model": "待现场填入 (e.g. 飞腾FT-2000/4, 鲲鹏920, 兆芯KX-6000, 海光C86)",
+      "cpu_cores": "待测 (如 4 核 / 8 核)",
+      "ram_installed_gib": 16,
+      "ram_available_gib": "待实测读回 (推荐 >= 10GiB)"
+    },
+    "os_and_software": {
+      "distribution": "UnionTech OS (UOS) Server 20 / Desktop 20",
+      "kernel_version": "待现场 uname -r",
+      "glibc_version": "待现场 ldd --version (通常 2.28 或以上)",
+      "python_runtime": "Python 3.11+"
+    },
+    "container_cgroup_policy": {
+      "memory_max": "4294967296",
+      "memory_swap_max": "0",
+      "cpu_quota": "200000 100000"
+    },
+    "deployment_verification_command": "python3 -m src.runner.run_eval --model gliner --config G5 --dataset novel_dev --threads 2 --output-dir target_verification"
+  }
+}

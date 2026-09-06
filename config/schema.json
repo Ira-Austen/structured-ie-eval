@@ -1,0 +1,56 @@
+{
+  "schema_version": "v1.0.0",
+  "domain": "unified_structured_ie",
+  "description": "Unified schema for entities, directed relations, and multi-role event records across literary and business domains.",
+  "entity_types": [
+    {"type": "Person", "description": "Individual actors, characters, officers"},
+    {"type": "Organization", "description": "Clans, sects, institutions, groups"},
+    {"type": "Company", "description": "Corporate entities, commercial enterprises"},
+    {"type": "Location", "description": "Physical places, delivery destinations"},
+    {"type": "Item", "description": "Physical artifacts, pills, commodities"},
+    {"type": "Skill", "description": "Martial arts techniques, special abilities"},
+    {"type": "Realm", "description": "Cultivation levels, job titles, ranks"},
+    {"type": "Amount", "description": "Financial quantities, transaction numbers"}
+  ],
+  "relation_types": [
+    {"type": "parent_of", "subject": "Person", "object": "Person", "directed": true},
+    {"type": "mentor_of", "subject": "Person", "object": "Person", "directed": true},
+    {"type": "member_of", "subject": "Person", "object": "Organization", "directed": true},
+    {"type": "holds_position", "subject": "Person", "object": "Company", "directed": true},
+    {"type": "holds_equity", "subject": "Person|Company", "object": "Company", "directed": true},
+    {"type": "transferred_to", "subject": "Person|Company", "object": "Person|Company", "directed": true},
+    {"type": "delivered_to", "subject": "Company", "object": "Location", "directed": true}
+  ],
+  "event_structures": [
+    {
+      "event_type": "Battle",
+      "anchor": "attacker",
+      "roles": ["attacker", "defender", "technique", "result"]
+    },
+    {
+      "event_type": "Payment",
+      "anchor": "payer",
+      "roles": ["payer", "payee", "amount", "status"]
+    },
+    {
+      "event_type": "Delivery",
+      "anchor": "carrier",
+      "roles": ["carrier", "item", "destination", "status"]
+    },
+    {
+      "event_type": "Breakthrough",
+      "anchor": "person",
+      "roles": ["person", "target_realm", "time"]
+    },
+    {
+      "event_type": "Gift",
+      "anchor": "giver",
+      "roles": ["giver", "recipient", "item"]
+    },
+    {
+      "event_type": "Tenure",
+      "anchor": "person",
+      "roles": ["person", "company", "position"]
+    }
+  ]
+}

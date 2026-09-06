@@ -1,0 +1,216 @@
+name: End-to-End Structured IE Evaluation (16GB Baseline)
+
+on:
+  workflow_dispatch:
+    inputs:
+      models:
+        description: "Models to evaluate (all, gliner, uie, baseline)"
+        required: true
+        default: "all"
+      run_full_novel:
+        description: "Run 96-window holdout novel test"
+        required: true
+        type: boolean
+        default: true
+      run_perf_curves:
+        description: "Run 1/2/4 thread latency and throughput curves"
+        required: true
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  preflight_and_manifest:
+    name: Environment Preflight & Telemetry
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Inspect Runner Hardware & Limits
+        run: |
+          echo "=== CPU Info ==="
+          lscpu | grep -E "Model name|Socket|Thread|NUMA|CPU\(s\)"
+          echo "=== Memory Info ==="
+          free -h
+          echo "=== Disk Info ==="
+          df -h
+          echo "=== Cgroup v2 Info ==="
+          ls -la /sys/fs/cgroup/ || true
+
+      - name: Run Unit Tests
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          python -m unittest discover tests
+
+  eval_gliner:
+    name: GLiNER2.5 Multi-Task Evaluation (G0-G5)
+    needs: preflight_and_manifest
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install PyTorch CPU & GLiNER2
+        run: |
+          pip install --upgrade pip
+          pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -r requirements.txt
+
+      - name: Run Synthetic Minimal Contrast Pairs (G0-G5)
+        run: |
+          for cfg in G0 G1 G2 G3 G4a G4b G5; do
+            echo "Running GLiNER config $cfg on Synthetic Set..."
+            python -m src.runner.run_eval --model gliner --config $cfg --dataset synthetic --threads 1 --output-dir results
+          done
+
+      - name: Run Cross-Domain Dev & Test Sets (G1, G2, G3, G5)
+        run: |
+          for cfg in G1 G2 G3 G5; do
+            echo "Running GLiNER config $cfg on Cross-Domain sets..."
+            python -m src.runner.run_eval --model gliner --config $cfg --dataset cross_dev --threads 1 --output-dir results
+            python -m src.runner.run_eval --model gliner --config $cfg --dataset cross_test --threads 1 --output-dir results
+          done
+
+      - name: Run Novel Dev & Holdout Test Sets (G1, G2, G3, G5)
+        run: |
+          echo "Running 24 Dev Windows (including 6 Smoke)..."
+          python -m src.runner.run_eval --model gliner --config G5 --dataset novel_dev --threads 1 --output-dir results
+          if [ "${{ github.event.inputs.run_full_novel }}" != "false" ]; then
+            echo "Running 96 Holdout Test Windows..."
+            python -m src.runner.run_eval --model gliner --config G5 --dataset novel_test --threads 1 --output-dir results
+          fi
+
+      - name: Run Performance Thread Scaling (1, 2, 4 Threads)
+        if: ${{ github.event.inputs.run_perf_curves != 'false' }}
+        run: |
+          for t in 1 2 4; do
+            echo "Running GLiNER G5 with $t threads..."
+            python -m src.runner.run_perf --model gliner --threads $t --repeats 3 --output-dir results
+          done
+
+      - name: Run Long Text Streaming & Chunking
+        run: |
+          python -m src.runner.run_long_text --model gliner --output-dir results
+
+      - name: Run Offline Reloadability Check
+        run: |
+          python -m src.runner.run_offline_check --model gliner --output-dir results
+
+      - name: Upload GLiNER Evaluation Artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gliner-eval-results
+          path: results/
+          retention-days: 7
+
+  eval_uie_and_baseline:
+    name: UIE (Medium & Mini) & Rule Baseline
+    needs: preflight_and_manifest
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install PyTorch CPU & Transformers
+        run: |
+          pip install --upgrade pip
+          pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -r requirements.txt
+
+      - name: Run Rule Baseline (B0)
+        run: |
+          python -m src.runner.run_eval --model baseline --config B0 --dataset synthetic --threads 1 --output-dir results
+          python -m src.runner.run_eval --model baseline --config B0 --dataset cross_test --threads 1 --output-dir results
+          python -m src.runner.run_eval --model baseline --config B0 --dataset novel_dev --threads 1 --output-dir results
+
+      - name: Run UIE-Medium & UIE-Mini
+        run: |
+          for variant in uie-medium uie-mini; do
+            echo "Evaluating $variant on Synthetic, Cross-Domain, and Novel Dev..."
+            python -m src.runner.run_eval --model uie --config $variant --dataset synthetic --threads 1 --output-dir results
+            python -m src.runner.run_eval --model uie --config $variant --dataset cross_test --threads 1 --output-dir results
+            python -m src.runner.run_eval --model uie --config $variant --dataset novel_dev --threads 1 --output-dir results
+            if [ "${{ github.event.inputs.run_full_novel }}" != "false" ]; then
+              python -m src.runner.run_eval --model uie --config $variant --dataset novel_test --threads 1 --output-dir results
+            fi
+          done
+
+      - name: Run Performance Thread Scaling for UIE
+        if: ${{ github.event.inputs.run_perf_curves != 'false' }}
+        run: |
+          for t in 1 2 4; do
+            python -m src.runner.run_perf --model uie-medium --threads $t --repeats 3 --output-dir results
+            python -m src.runner.run_perf --model uie-mini --threads $t --repeats 3 --output-dir results
+          done
+
+      - name: Run Long Text Chunking for UIE
+        run: |
+          python -m src.runner.run_long_text --model uie --output-dir results
+
+      - name: Run Offline Reloadability Check for UIE
+        run: |
+          python -m src.runner.run_offline_check --model uie-medium --output-dir results
+          python -m src.runner.run_offline_check --model uie-mini --output-dir results
+
+      - name: Upload UIE Evaluation Artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: uie-eval-results
+          path: results/
+          retention-days: 7
+
+  aggregate_and_report:
+    name: Generate Summary & Final Evaluation Report
+    needs: [eval_gliner, eval_uie_and_baseline]
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: merged_results/
+
+      - name: Aggregate & Generate Markdown Report
+        run: |
+          mkdir -p final_results
+          find merged_results/ -type f -name "*.json" -exec cp {} final_results/ \;
+          python -m src.runner.generate_report --results-dir final_results --output-report REPORT.md
+          cat REPORT.md >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload Final Comprehensive Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: full-evaluation-report
+          path: |
+            REPORT.md
+            final_results/
+          retention-days: 30
