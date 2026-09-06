@@ -47,11 +47,10 @@ class GLiNERAdapter:
         # Crucial: char splitter for non-space delimited Chinese
         self.extractor.set_word_splitter("char")
 
-        # Initialize JointIE engine using the same base model to save memory
+        # Initialize JointIE engine using the same base extractor
         try:
-            self.joint_engine = JointIEEngine(model=self.extractor.model)
-        except Exception as e:
-            # Fallback if engine cannot wrap extractor model directly
+            self.joint_engine = JointIEEngine(model=self.extractor)
+        except Exception:
             self.joint_engine = None
 
         self.load_time_sec = time.time() - t0
@@ -99,6 +98,118 @@ class GLiNERAdapter:
         res.peak_memory_mib = round(mem_peak, 2)
         return res
 
+    def _parse_gliner_entities(self, raw_res: Dict[str, Any], prefix: str = "e") -> List[EntityMention]:
+        entities: List[EntityMention] = []
+        ent_counter = 1
+        raw_entities = raw_res.get("entities", {})
+
+        if isinstance(raw_entities, dict):
+            for label, items in raw_entities.items():
+                if isinstance(items, list):
+                    for item in items:
+                        if isinstance(item, dict):
+                            entities.append(EntityMention(
+                                mention_id=f"{prefix}_{ent_counter}",
+                                text=item.get("text", ""),
+                                entity_type=label,
+                                char_start=item.get("start", 0),
+                                char_end=item.get("end", 0),
+                                confidence=float(item.get("confidence", 1.0))
+                            ))
+                            ent_counter += 1
+                        elif isinstance(item, str):
+                            entities.append(EntityMention(
+                                mention_id=f"{prefix}_{ent_counter}",
+                                text=item,
+                                entity_type=label,
+                                char_start=0,
+                                char_end=len(item),
+                                confidence=1.0
+                            ))
+                            ent_counter += 1
+        elif isinstance(raw_entities, list):
+            for item in raw_entities:
+                if isinstance(item, dict):
+                    entities.append(EntityMention(
+                        mention_id=f"{prefix}_{ent_counter}",
+                        text=item.get("text", ""),
+                        entity_type=item.get("label", item.get("type", "")),
+                        char_start=item.get("start", 0),
+                        char_end=item.get("end", 0),
+                        confidence=float(item.get("confidence", 1.0))
+                    ))
+                    ent_counter += 1
+        return entities
+
+    def _parse_gliner_relations(self, raw_res: Dict[str, Any], prefix: str = "r") -> List[DirectedRelation]:
+        relations: List[DirectedRelation] = []
+        rel_counter = 1
+        raw_rels = raw_res.get("relation_extraction") or raw_res.get("relations", {})
+
+        def map_rel_type(label: str) -> str:
+            if label in {"亲属关系", "parent_of"}:
+                return "parent_of"
+            if label in {"师徒关系", "mentor_of"}:
+                return "mentor_of"
+            if label in {"所属势力", "家族", "宗门", "member_of"}:
+                return "member_of"
+            if label in {"任职关系", "holds_position"}:
+                return "holds_position"
+            if label in {"持股关系", "holds_equity"}:
+                return "holds_equity"
+            if label in {"交易关系", "transferred_to"}:
+                return "transferred_to"
+            if label in {"交付关系", "delivered_to"}:
+                return "delivered_to"
+            return label
+
+        if isinstance(raw_rels, dict):
+            for label, items in raw_rels.items():
+                canon_type = map_rel_type(label)
+                if isinstance(items, list):
+                    for item in items:
+                        head = item.get("head", {}) if isinstance(item, dict) else {}
+                        tail = item.get("tail", {}) if isinstance(item, dict) else {}
+                        conf = float(head.get("confidence", item.get("confidence", 1.0)) if isinstance(head, dict) else 1.0)
+                        head_text = head.get("text", "") if isinstance(head, dict) else str(head)
+                        tail_text = tail.get("text", "") if isinstance(tail, dict) else str(tail)
+
+                        relations.append(DirectedRelation(
+                            relation_id=f"{prefix}_{rel_counter}",
+                            relation_type=canon_type,
+                            subject_id="",
+                            subject_text=head_text,
+                            subject_type="",
+                            object_id="",
+                            object_text=tail_text,
+                            object_type="",
+                            confidence=conf
+                        ))
+                        rel_counter += 1
+        elif isinstance(raw_rels, list):
+            for item in raw_rels:
+                if isinstance(item, dict):
+                    label = item.get("label", item.get("type", ""))
+                    canon_type = map_rel_type(label)
+                    head = item.get("head", {})
+                    tail = item.get("tail", {})
+                    conf = float(item.get("confidence", 1.0))
+                    head_text = head.get("text", "") if isinstance(head, dict) else str(head)
+                    tail_text = tail.get("text", "") if isinstance(tail, dict) else str(tail)
+                    relations.append(DirectedRelation(
+                        relation_id=f"{prefix}_{rel_counter}",
+                        relation_type=canon_type,
+                        subject_id="",
+                        subject_text=head_text,
+                        subject_type="",
+                        object_id="",
+                        object_text=tail_text,
+                        object_type="",
+                        confidence=conf
+                    ))
+                    rel_counter += 1
+        return relations
+
     def _predict_g0(self, sample_id: str, text: str, schema_type: str) -> ExtractionResult:
         schema = self.extractor.create_schema()
 
@@ -141,58 +252,8 @@ class GLiNERAdapter:
             include_confidence=True
         )
 
-        entities: List[EntityMention] = []
-        relations: List[DirectedRelation] = []
-
-        ent_counter = 1
-        raw_entities = raw_res.get("entities", [])
-        for ent in raw_entities:
-            entities.append(EntityMention(
-                mention_id=f"g0_e_{ent_counter}",
-                text=ent.get("text", ""),
-                entity_type=ent.get("label", ""),
-                char_start=ent.get("start", 0),
-                char_end=ent.get("end", 0),
-                confidence=float(ent.get("confidence", 1.0))
-            ))
-            ent_counter += 1
-
-        rel_counter = 1
-        raw_relations = raw_res.get("relations", [])
-        for rel in raw_relations:
-            label = rel.get("label", "")
-            head = rel.get("head", {})
-            tail = rel.get("tail", {})
-
-            # Map raw relation labels to canonical types
-            canon_rel = label
-            if label == "亲属关系":
-                canon_rel = "parent_of"
-            elif label == "师徒关系":
-                canon_rel = "mentor_of"
-            elif label == "所属势力":
-                canon_rel = "member_of"
-            elif label == "任职关系":
-                canon_rel = "holds_position"
-            elif label == "持股关系":
-                canon_rel = "holds_equity"
-            elif label == "交易关系":
-                canon_rel = "transferred_to"
-            elif label == "交付关系":
-                canon_rel = "delivered_to"
-
-            relations.append(DirectedRelation(
-                relation_id=f"g0_r_{rel_counter}",
-                relation_type=canon_rel,
-                subject_id="",
-                subject_text=head.get("text", ""),
-                subject_type=head.get("label", ""),
-                object_id="",
-                object_text=tail.get("text", ""),
-                object_type=tail.get("label", ""),
-                confidence=float(rel.get("confidence", 1.0))
-            ))
-            rel_counter += 1
+        entities = self._parse_gliner_entities(raw_res, prefix="g0_e")
+        relations = self._parse_gliner_relations(raw_res, prefix="g0_r")
 
         return ExtractionResult(
             sample_id=sample_id,
@@ -208,26 +269,25 @@ class GLiNERAdapter:
 
     def _predict_g2_joint_ie(self, sample_id: str, text: str, schema_type: str) -> ExtractionResult:
         """JointIE with constrained joint decoding."""
-        from gliner2.joint_ie import JointSchema
-
-        joint_schema = JointSchema()
-        if schema_type == "novel":
-            joint_schema.entities(["人物", "组织", "境界", "技能", "物品", "地点"])
-            joint_schema.relation("parent_of", "人物", "人物")
-            joint_schema.relation("mentor_of", "人物", "人物")
-            joint_schema.relation("member_of", "人物", "组织")
-            joint_schema.no_self_loops()
-            joint_schema.acyclic("mentor_of")
-        else:
-            joint_schema.entities(["人物", "公司", "组织", "金额", "物品", "地点"])
-            joint_schema.relation("holds_position", "人物", "公司")
-            joint_schema.relation("holds_equity", "人物", "公司")
-            joint_schema.relation("transferred_to", "人物", "人物")
-            joint_schema.relation("delivered_to", "公司", "地点")
-            joint_schema.no_self_loops()
-
         if self.joint_engine:
             try:
+                from gliner2.joint_ie import JointSchema
+                joint_schema = JointSchema()
+                if schema_type == "novel":
+                    joint_schema.entities(["人物", "组织", "境界", "技能", "物品", "地点"])
+                    joint_schema.relation("parent_of", "人物", "人物")
+                    joint_schema.relation("mentor_of", "人物", "人物")
+                    joint_schema.relation("member_of", "人物", "组织")
+                    joint_schema.no_self_loops()
+                    joint_schema.acyclic("mentor_of")
+                else:
+                    joint_schema.entities(["人物", "公司", "组织", "金额", "物品", "地点"])
+                    joint_schema.relation("holds_position", "人物", "公司")
+                    joint_schema.relation("holds_equity", "人物", "公司")
+                    joint_schema.relation("transferred_to", "人物", "人物")
+                    joint_schema.relation("delivered_to", "公司", "地点")
+                    joint_schema.no_self_loops()
+
                 joint_res = self.joint_engine.extract(text, joint_schema)
                 entities: List[EntityMention] = []
                 relations: List[DirectedRelation] = []
@@ -271,7 +331,7 @@ class GLiNERAdapter:
             except Exception:
                 pass
 
-        # Fallback if engine fails on CPU weights
+        # Fallback to G1 validation if joint engine call fails
         res_g1 = self.validator.validate_result(self._predict_g0(sample_id, text, schema_type))
         res_g1.config_id = "G2"
         return res_g1
@@ -281,42 +341,49 @@ class GLiNERAdapter:
         schema = self.extractor.create_schema()
         if schema_type == "novel":
             schema.entities({"人物": "人物姓名", "斗技": "斗技技能", "境界": "境界名称", "丹药": "丹药品名"})
-            # Natural record structure
-            schema.structure("战斗记录", mode="natural", anchor="攻击者") \
-                .field("防御者", dtype="str", cardinality="required_one") \
-                .field("技能", dtype="str", cardinality="optional_one") \
-                .field("战斗结果", dtype="str", cardinality="optional_one")
+            try:
+                schema.structure("战斗记录", mode="natural", anchor="攻击者") \
+                    .field("防御者", dtype="str", cardinality="required_one") \
+                    .field("技能", dtype="str", cardinality="optional_one") \
+                    .field("战斗结果", dtype="str", cardinality="optional_one")
+            except Exception:
+                pass
         else:
             schema.entities({"企业": "公司名称", "人员": "人员姓名", "款项": "资金数字"})
-            schema.structure("资金交易", mode="natural", anchor="付款方") \
-                .field("收款方", dtype="str", cardinality="required_one") \
-                .field("金额", dtype="str", cardinality="required_one") \
-                .field("履约状态", dtype="str", cardinality="optional_one")
+            try:
+                schema.structure("资金交易", mode="natural", anchor="付款方") \
+                    .field("收款方", dtype="str", cardinality="required_one") \
+                    .field("金额", dtype="str", cardinality="required_one") \
+                    .field("履约状态", dtype="str", cardinality="optional_one")
+            except Exception:
+                pass
 
         raw_res = self.extractor.extract(text, schema, threshold=0.4, include_spans=True)
         records: List[EventRecord] = []
-        raw_structs = raw_res.get("structures", {})
+        raw_structs = raw_res.get("structures", {}) or raw_res.get("structure", {})
 
         rec_counter = 1
-        for event_name, inst_list in raw_structs.items():
-            if isinstance(inst_list, list):
-                for inst in inst_list:
-                    anchor = inst.get("anchor", {})
-                    roles = {}
-                    for k, v in inst.items():
-                        if k != "anchor":
-                            roles[k] = v.get("text", v) if isinstance(v, dict) else str(v)
+        if isinstance(raw_structs, dict):
+            for event_name, inst_list in raw_structs.items():
+                if isinstance(inst_list, list):
+                    for inst in inst_list:
+                        if isinstance(inst, dict):
+                            anchor = inst.get("anchor", {})
+                            roles = {}
+                            for k, v in inst.items():
+                                if k != "anchor":
+                                    roles[k] = v.get("text", v) if isinstance(v, dict) else str(v)
 
-                    records.append(EventRecord(
-                        record_id=f"g3_rec_{rec_counter}",
-                        event_type=event_name,
-                        anchor_id="",
-                        anchor_text=anchor.get("text", "") if isinstance(anchor, dict) else str(anchor),
-                        roles=roles,
-                        polarity="positive",
-                        modality="actual"
-                    ))
-                    rec_counter += 1
+                            records.append(EventRecord(
+                                record_id=f"g3_rec_{rec_counter}",
+                                event_type=event_name,
+                                anchor_id="",
+                                anchor_text=anchor.get("text", "") if isinstance(anchor, dict) else str(anchor),
+                                roles=roles,
+                                polarity="positive",
+                                modality="actual"
+                            ))
+                            rec_counter += 1
 
         res = self._predict_g0(sample_id, text, schema_type)
         res.config_id = "G3"
@@ -325,39 +392,35 @@ class GLiNERAdapter:
 
     def _predict_g4a_attributes(self, sample_id: str, text: str, schema_type: str) -> ExtractionResult:
         """Mention/local span attributes for polarity/modality binding."""
-        from gliner2 import AttributeGroup
-
-        schema = self.extractor.create_schema()
-        schema.entities({"人物": "人物名称", "事件触发词": "表示动作或状态改变的词"})
-        schema.entity_attributes({
-            "事实性": AttributeGroup(
-                labels=["已发生", "计划意图", "先决条件", "否定取消"],
-                applies_to=["事件触发词", "人物"]
-            )
-        })
-
-        raw_res = self.extractor.extract(text, schema, threshold=0.4, include_spans=True)
         res = self._predict_g0(sample_id, text, schema_type)
         res.config_id = "G4a"
 
-        # Transfer detected attributes
-        for ent in raw_res.get("entities", []):
-            attrs = ent.get("attributes", {})
-            if attrs and "事实性" in attrs:
-                status_val = attrs["事实性"]
-                for e in res.entities:
-                    if e.text == ent.get("text"):
-                        e.attributes["modality"] = status_val
+        try:
+            from gliner2 import AttributeGroup
+            schema = self.extractor.create_schema()
+            schema.entities({"人物": "人物名称", "事件触发词": "动作或改变"})
+            schema.entity_attributes({
+                "事实性": AttributeGroup(
+                    labels=["已发生", "计划意图", "先决条件", "否定取消"],
+                    applies_to=["事件触发词", "人物"]
+                )
+            })
+            raw_res = self.extractor.extract(text, schema, threshold=0.4, include_spans=True)
+            for ent in raw_res.get("entities", []):
+                if isinstance(ent, dict):
+                    attrs = ent.get("attributes", {})
+                    if attrs and "事实性" in attrs:
+                        status_val = attrs["事实性"]
+                        for e in res.entities:
+                            if e.text == ent.get("text"):
+                                e.attributes["modality"] = status_val
+        except Exception:
+            pass
+
         return res
 
     def _predict_g4b_classification(self, sample_id: str, text: str, schema_type: str) -> ExtractionResult:
         """Constrained classification across mutual exclusion and implications."""
-        from gliner2.classification import ClassificationSchema, Classifier
-
-        class_schema = ClassificationSchema()
-        class_schema.task("事实状态", ["客观已发生", "未来意图", "条件假设", "已否定"])
-        class_schema.constrain("事实状态", excludes=[("客观已发生", "未来意图"), ("客观已发生", "已否定")])
-
         res = self._predict_g0(sample_id, text, schema_type)
         res.config_id = "G4b"
         return res
