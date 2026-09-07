@@ -56,6 +56,8 @@ def main():
     parser.add_argument("--threads", type=int, default=1)
     parser.add_argument("--model-path", type=str, default="")
     parser.add_argument("--output-dir", type=str, default="results")
+    parser.add_argument("--enforce-quality-gate", action="store_true", default=False,
+                        help="Fail with exit code 1 if runtime fails or extraction is all-empty")
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -174,6 +176,31 @@ def main():
 
     print(f"Results saved to {metrics_file} and {pred_file}")
     print(f"Metrics Summary: Ent F1={ent_metrics['f1']} | Rel F1={rel_metrics['f1']} (RevErr={rel_metrics['reverse_error_rate']}) | Rec F1={rec_metrics['role_f1']} | Peak RAM={mon_summary['peak_rss_mib']} MiB")
+
+    # Quality Gate Verification
+    failed_samples = [r for r in results if r.status == "FAILED_RUNTIME"]
+    gate_failed = False
+    if failed_samples:
+        print(f"\n[QUALITY GATE FAILED] {len(failed_samples)} samples failed with FAILED_RUNTIME:")
+        for fs in failed_samples[:5]:
+            print(f"  - {fs.sample_id}: {fs.error_message}")
+        gate_failed = True
+
+    if len(gold_entities_all) > 0 and len(pred_entities_all) == 0:
+        print(f"\n[QUALITY GATE FAILED] 0 entities predicted despite {len(gold_entities_all)} gold entities!")
+        gate_failed = True
+
+    if args.config in {"G1", "G2", "G5"} and len(gold_relations_all) > 0 and len(pred_relations_all) == 0:
+        print(f"\n[QUALITY GATE FAILED] 0 relations predicted for {args.config} despite {len(gold_relations_all)} gold relations!")
+        gate_failed = True
+
+    if args.config in {"G3", "G5"} and len(gold_records_all) > 0 and len(pred_records_all) == 0:
+        print(f"\n[QUALITY GATE FAILED] 0 records predicted for {args.config} despite {len(gold_records_all)} gold records!")
+        gate_failed = True
+
+    if gate_failed and args.enforce_quality_gate:
+        print("[FATAL] Quality gate failed. Halting workflow as required by task specification.")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

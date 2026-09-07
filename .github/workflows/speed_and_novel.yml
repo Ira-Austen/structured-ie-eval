@@ -3,36 +3,40 @@ name: Speed Limit Optimization & Full Novel Benchmark
 on:
   workflow_dispatch:
     inputs:
-      run_speed_limit:
-        description: "Run 6-tier Optimization Verification & Speed Limit Sweep"
+      run_quality_gate:
+        description: "Run Quality Gate (Dev set & contracts check before extraction)"
+        required: true
+        type: boolean
+        default: true
+      run_speed_sweep:
+        description: "Run 1/2/4 Thread x BS 1/4/8/16 Speed Benchmark Sweep"
         required: true
         type: boolean
         default: true
       run_full_novel:
-        description: "Run Full Novel End-to-End Extraction (No Cascade Filtering)"
+        description: "Run Full Novel End-to-End Extraction (Balanced Sharded Parallel)"
         required: true
         type: boolean
         default: true
       max_chapters:
         description: "Max chapters to extract (0 = all 1646 chapters, 100 = first 100 chapters)"
         required: true
-        default: "100"
+        default: "0"
       batch_size:
-        description: "Batch size for chunk extraction"
+        description: "Batch size for saturated chunk extraction"
         required: true
         default: "16"
-      enable_int8:
-        description: "Enable INT8 Dynamic Quantization"
+      total_shards:
+        description: "Total parallel shards for balanced novel processing"
         required: true
-        type: boolean
-        default: false
+        default: "4"
 
 permissions:
   contents: read
 
 jobs:
-  run_benchmarks:
-    name: Speed Limit Sweep & Full Novel Extraction
+  preflight_and_gate:
+    name: Preflight & Quality Gate
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
@@ -43,102 +47,231 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Inspect Hardware & Vector Capabilities
+      - name: Inspect Hardware & Capabilities
         run: |
-          echo "=== CPU Hardware & Vector Instructions ==="
+          echo "=== CPU Hardware ==="
           lscpu | grep -E "Model name|Socket|Thread|NUMA|CPU\(s\)|Flags" || lscpu
-          echo "=== Memory Status ==="
+          echo "=== Memory & Swap ==="
           free -h
           echo "=== Cgroup v2 Info ==="
           cat /sys/fs/cgroup/memory.max 2>/dev/null || true
 
-      - name: Install PyTorch CPU & GLiNER2 Dependencies
+      - name: Install PyTorch CPU & Dependencies
         run: |
           pip install --upgrade pip
           pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
           pip install -r requirements.txt
+
+      - name: Run Unit Tests
+        run: |
           python -m unittest discover tests
 
-      - name: Run Optimization Verification & Speed Limit Sweep
-        if: ${{ github.event.inputs.run_speed_limit != 'false' }}
+      - name: Run Quality Gate on Novel Dev Set (G5 FP32)
+        if: ${{ github.event.inputs.run_quality_gate != 'false' }}
         run: |
-          echo "Executing 6-tier Optimization Benchmark..."
-          python -m src.runner.run_speed_limit --max-chars 40000 --output-dir results
-
-      - name: Run Full Novel End-to-End Extraction
-        if: ${{ github.event.inputs.run_full_novel != 'false' }}
-        run: |
-          INT8_FLAG=""
-          if [ "${{ github.event.inputs.enable_int8 }}" = "true" ]; then
-            INT8_FLAG="--enable-int8"
-          fi
-          echo "Running Full Novel Extraction on max_chapters=${{ github.event.inputs.max_chapters }}..."
-          python -m src.runner.run_full_novel \
-            --max-chapters ${{ github.event.inputs.max_chapters }} \
-            --batch-size ${{ github.event.inputs.batch_size }} \
+          echo "Verifying G5 FP32 extraction baseline on 24 Novel Dev windows..."
+          python -m src.runner.run_eval \
+            --model gliner \
+            --config G5 \
+            --dataset novel_dev \
             --threads 4 \
-            $INT8_FLAG \
-            --output-dir results
+            --enforce-quality-gate \
+            --output-dir results_gate
 
-      - name: Summarize Results to Step Summary
-        if: always()
+  speed_sweep:
+    name: Speed Limit Grid Sweep (1/2/4T x BS 1/4/8/16)
+    needs: preflight_and_gate
+    if: ${{ github.event.inputs.run_speed_sweep != 'false' }}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install PyTorch CPU & Dependencies
         run: |
-          echo "# 🚀 Speed Limit Optimization & Full Novel Benchmark Results" >> $GITHUB_STEP_SUMMARY
-          if [ -f "results/speed_limit_benchmark.json" ]; then
-            echo "## 📊 Optimization Verification (Speed Ceiling Sweep)" >> $GITHUB_STEP_SUMMARY
-            python -c '
-          import json
-          with open("results/speed_limit_benchmark.json") as f:
-              data = json.load(f)
-          print("| Optimization Tier | Batch Size | Threads | Chars/s | Latency (P50) | Speedup | Peak RAM |")
-          print("|---|---|---|---|---|---|---|")
-          for t in data["tiers"]:
-              print(f"| **{t[\"tier\"]}** | {t[\"batch_size\"]} | {t[\"threads\"]} | **{t[\"chars_per_sec\"]}** c/s | {t[\"latency_p50_ms\"]} ms | **{t[\"speedup\"]}x** | {t[\"peak_ram_mib\"]} MiB |")
-          ' >> $GITHUB_STEP_SUMMARY
-          fi
+          pip install --upgrade pip
+          pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -r requirements.txt
 
-          if [ -f "results/doupo_full_perf.json" ]; then
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "## 📖 《斗破苍穹》端到端抽取性能 (无级联初筛)" >> $GITHUB_STEP_SUMMARY
-            python -c '
-          import json
-          with open("results/doupo_full_perf.json") as f:
-              data = json.load(f)
-          print(f"- **总处理字符量**: {data.get(\"total_novel_characters\", 0):,} 字符")
-          print(f"- **处理章节数**: {data.get(\"total_chapters\", 0)} 章")
-          print(f"- **总耗时**: {data.get(\"elapsed_seconds\", 0)} 秒 ({data.get(\"elapsed_minutes\", 0)} 分钟)")
-          print(f"- **平均吞吐**: **{data.get(\"average_throughput_chars_per_sec\", 0)} 字符/秒**")
-          print(f"- **峰值内存 (RSS)**: {data.get(\"peak_rss_mib\", 0)} MiB")
-          ' >> $GITHUB_STEP_SUMMARY
-          fi
+      - name: Execute Controlled Speed Benchmark Sweep
+        run: |
+          echo "Running 1/2/4 Thread x BS 1/4/8/16 Grid Sweep with deduplicated source characters..."
+          python -m src.runner.run_speed_limit \
+            --max-chars 40000 \
+            --num-chunks 32 \
+            --output-dir results_speed
 
-          if [ -f "results/doupo_full_kg_summary.json" ]; then
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "## 🕸️ 知识图谱抽取成果概览" >> $GITHUB_STEP_SUMMARY
-            python -c '
-          import json
-          with open("results/doupo_full_kg_summary.json") as f:
-              data = json.load(f)
-          m = data.get("metrics", {})
-          print(f"- **独立实体总数**: {m.get(\"unique_entities_total\", 0)}")
-          print(f"- **人物**: {m.get(\"unique_characters\", 0)} | **势力门派**: {m.get(\"unique_organizations\", 0)} | **斗技技能**: {m.get(\"unique_skills\", 0)}")
-          print(f"- **关系三元组**: {m.get(\"unique_relations_triples\", 0)} | **战斗事件记录**: {m.get(\"total_battle_events\", 0)}")
-          print("\n### Top 10 人物榜")
-          for i, c in enumerate(data.get("top_characters", [])[:10], 1):
-              print(f"{i}. **{c[\"name\"]}** ({c[\"count\"]} 次登场)")
-          print("\n### Top 10 势力与门派")
-          for i, org in enumerate(data.get("top_organizations", [])[:10], 1):
-              print(f"{i}. **{org[\"name\"]}** ({org[\"count\"]} 次出现)")
-          print("\n### Top 10 斗技技能")
-          for i, sk in enumerate(data.get("top_skills", [])[:10], 1):
-              print(f"{i}. **{sk[\"name\"]}** ({sk[\"count\"]} 次使用)")
-          ' >> $GITHUB_STEP_SUMMARY
-          fi
-
-      - name: Upload Benchmark Artifacts
+      - name: Upload Speed Benchmark Artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: speed-and-novel-results
-          path: results/
-          retention-days: 14
+          name: speed-benchmark-results
+          path: results_speed/
+
+  sharded_novel_extraction:
+    name: Novel Extraction Shard ${{ matrix.shard_index }}
+    needs: preflight_and_gate
+    if: ${{ github.event.inputs.run_full_novel != 'false' }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        shard_index: [0, 1, 2, 3]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install PyTorch CPU & Dependencies
+        run: |
+          pip install --upgrade pip
+          pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -r requirements.txt
+
+      - name: Run Balanced Shard Novel Extraction (Streaming Checkpoint)
+        run: |
+          echo "Running Shard ${{ matrix.shard_index }} (Total Shards: ${{ github.event.inputs.total_shards }})..."
+          python -m src.runner.run_full_novel \
+            --shard-index ${{ matrix.shard_index }} \
+            --total-shards ${{ github.event.inputs.total_shards }} \
+            --max-chapters ${{ github.event.inputs.max_chapters }} \
+            --batch-size ${{ github.event.inputs.batch_size }} \
+            --threads 4 \
+            --output-dir shard_results
+
+      - name: Upload Shard Artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: novel-shard-${{ matrix.shard_index }}
+          path: shard_results/
+
+  aggregate_and_report:
+    name: Aggregate Shards & Unified Summary
+    needs: [preflight_and_gate, sharded_novel_extraction]
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Download Shard Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: downloaded_shards
+
+      - name: Download Speed Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: speed-benchmark-results
+          path: downloaded_speed
+        continue-on-error: true
+
+      - name: Flatten and Aggregate Shard Checkpoints
+        run: |
+          mkdir -p collected_shards
+          find downloaded_shards -name "shard_*_checkpoint.jsonl" -exec cp {} collected_shards/ \;
+          find downloaded_shards -name "shard_*_manifest.json" -exec cp {} collected_shards/ \;
+          ls -la collected_shards/
+
+          python -m src.runner.aggregate_novel_shards \
+            --results-dir collected_shards \
+            --output-dir final_results
+
+      - name: Generate Markdown Summary to Step Summary
+        if: always()
+        run: |
+          echo "# 🚀 GLiNER2.5 16GB 基准优化与全本抽取评测总结" >> $GITHUB_STEP_SUMMARY
+
+          if [ -f "downloaded_speed/speed_limit_benchmark.json" ]; then
+            echo "## 📊 纯模型实测吞吐与多线程网格扫描 (去重原文字符口径)" >> $GITHUB_STEP_SUMMARY
+            python -c "
+          import json
+          with open('downloaded_speed/speed_limit_benchmark.json') as f:
+              data = json.load(f)
+          print('| 配置 / 梯级 | 线程 | 批大小 | 去重吞吐 (字符/秒) | P50延迟 (ms) | 加速比 | 门禁状态 |')
+          print('|---|---|---|---|---|---|---|')
+          for t in data['tiers']:
+              print(f'| **{t[\"tier\"]}** | {t[\"threads\"]} | {t[\"batch_size\"]} | **{t[\"unique_chars_per_sec\"]}** | {t[\"latency_p50_ms\"]} | **{t[\"speedup_vs_baseline\"]}x** | {t[\"quality_gate\"]} |')
+          " >> $GITHUB_STEP_SUMMARY
+          fi
+
+          if [ -f "final_results/doupo_full_perf.json" ]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "## 📖 《斗破苍穹》全本全量抽取性能汇总" >> $GITHUB_STEP_SUMMARY
+            python -c "
+          import json
+          with open('final_results/doupo_full_perf.json') as f:
+              data = json.load(f)
+          print(f'- **全书正文字符数**: {data.get(\"total_novel_characters\", 0):,} 字符')
+          print(f'- **覆盖章节总数**: {data.get(\"covered_chapters\", 0)} / {data.get(\"total_chapters\", 0)} 章')
+          print(f'- **独立推理窗口**: {data.get(\"covered_windows\", 0):,} 窗')
+          print(f'- **累计计算时间 (CPU总耗时)**: {data.get(\"total_cpu_elapsed_hours\", 0)} 小时 ({data.get(\"total_cpu_elapsed_seconds\", 0)} 秒)')
+          print(f'- **单机等效纯模型吞吐**: **{data.get(\"equivalent_single_node_throughput_chars_per_sec\", 0)} 字符/秒**')
+          print(f'- **分片并行数**: {data.get(\"total_shards\", 0)} 台 16GB 运行器')
+          print(f'- **峰值内存 (RSS)**: {data.get(\"peak_rss_mib\", 0)} MiB')
+          " >> $GITHUB_STEP_SUMMARY
+          fi
+
+          if [ -f "final_results/doupo_coverage_report.json" ]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "## 🔍 章节全量覆盖核验" >> $GITHUB_STEP_SUMMARY
+            python -c "
+          import json
+          with open('final_results/doupo_coverage_report.json') as f:
+              data = json.load(f)
+          is_c = data.get('is_complete', False)
+          status_str = '✅ 100% 完整覆盖无遗漏' if is_c else '⚠️ 存在未覆盖章节'
+          print(f'- **覆盖率**: **{data.get(\"coverage_percentage\", 0)}%** ({status_str})')
+          print(f'- **覆盖章节数**: {data.get(\"covered_chapters_count\", 0)} / {data.get(\"total_chapters\", 0)}')
+          " >> $GITHUB_STEP_SUMMARY
+          fi
+
+          if [ -f "final_results/doupo_full_kg_summary.json" ]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "## 🕸️ 斗破苍穹宏观结构化知识图谱成果" >> $GITHUB_STEP_SUMMARY
+            python -c "
+          import json
+          with open('final_results/doupo_full_kg_summary.json') as f:
+              data = json.load(f)
+          m = data.get('metrics', {})
+          print(f'- **独立实体总数**: {m.get(\"unique_entities_total\", 0):,}')
+          print(f'- **核心人物角色**: {m.get(\"unique_characters\", 0):,} 位')
+          print(f'- **宗门家族势力**: {m.get(\"unique_organizations\", 0):,} 个')
+          print(f'- **功法斗技技能**: {m.get(\"unique_skills\", 0):,} 项')
+          print(f'- **有向关系三元组**: {m.get(\"unique_relations_triples\", 0):,} 组')
+          print(f'- **动态战斗事件记录**: {m.get(\"total_battle_events\", 0):,} 起')
+          print('')
+          print('### Top 人物登场榜 (含登场章节数)')
+          print('| 排名 | 人物角色 | 提及频次 | 登场章节数 |')
+          print('|---|---|---|---|')
+          for idx, ch in enumerate(data.get('top_characters', [])[:15], 1):
+              print(f'| {idx} | **{ch[\"name\"]}** | {ch[\"count\"]} | {ch.get(\"chapter_appearances\", 0)} 章 |')
+          print('')
+          print('### Top 有向关系三元组 (带证据定位)')
+          print('| 主体 (Subject) | 类型 | 谓词 (Predicate) | 客体 (Object) | 类型 | 频次 |')
+          print('|---|---|---|---|---|---|')
+          for rel in data.get('top_relations', [])[:15]:
+              print(f'| {rel[\"subject\"]} | {rel[\"subject_type\"]} | **{rel[\"predicate\"]}** | {rel[\"object\"]} | {rel[\"object_type\"]} | {rel[\"frequency\"]} |')
+          " >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Upload Final Unified Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: full-novel-kg-and-perf
+          path: final_results/

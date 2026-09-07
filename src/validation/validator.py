@@ -19,6 +19,18 @@ RELATION_TYPE_CONSTRAINTS = {
         "allow_self_loop": False,
         "symmetric": False,
     },
+    "kinship": {
+        "valid_subjects": {"Person", "人物", "称谓"},
+        "valid_objects": {"Person", "人物", "称谓"},
+        "allow_self_loop": False,
+        "symmetric": True,
+    },
+    "亲属关系": {
+        "valid_subjects": {"Person", "人物", "称谓"},
+        "valid_objects": {"Person", "人物", "称谓"},
+        "allow_self_loop": False,
+        "symmetric": True,
+    },
     "mentor_of": {
         "valid_subjects": {"Person", "人物", "称谓"},
         "valid_objects": {"Person", "人物", "称谓"},
@@ -90,7 +102,13 @@ class UnifiedValidator:
         seen_facts: Set[Tuple[str, str, str]] = set()
 
         # Index known entities if available
-        ent_by_id = {e.mention_id: e for e in entities} if entities else {}
+        ent_by_id = {e.mention_id: e for e in entities if e.mention_id} if entities else {}
+        ent_by_text = {}
+        if entities:
+            for e in entities:
+                t = e.text.strip()
+                if t and t not in ent_by_text:
+                    ent_by_text[t] = e.entity_type
 
         for rel in relations:
             # Check self-loop
@@ -99,15 +117,30 @@ class UnifiedValidator:
             if rel.subject_text.strip() == rel.object_text.strip():
                 continue
 
+            # Resolve missing subject_type and object_type from entity list
+            sub_type = rel.subject_type
+            if not sub_type and rel.subject_id in ent_by_id:
+                sub_type = ent_by_id[rel.subject_id].entity_type
+            if not sub_type and rel.subject_text.strip() in ent_by_text:
+                sub_type = ent_by_text[rel.subject_text.strip()]
+
+            obj_type = rel.object_type
+            if not obj_type and rel.object_id in ent_by_id:
+                obj_type = ent_by_id[rel.object_id].entity_type
+            if not obj_type and rel.object_text.strip() in ent_by_text:
+                obj_type = ent_by_text[rel.object_text.strip()]
+
+            if sub_type:
+                rel.subject_type = sub_type
+            if obj_type:
+                rel.object_type = obj_type
+
             # Check constraint rules if relation_type is known
             rule = self.constraints.get(rel.relation_type)
             if rule:
-                sub_type = rel.subject_type or (ent_by_id[rel.subject_id].entity_type if rel.subject_id in ent_by_id else None)
-                obj_type = rel.object_type or (ent_by_id[rel.object_id].entity_type if rel.object_id in ent_by_id else None)
-
-                if sub_type and rule["valid_subjects"] and sub_type not in rule["valid_subjects"]:
+                if sub_type and rule.get("valid_subjects") and sub_type not in rule["valid_subjects"]:
                     continue
-                if obj_type and rule["valid_objects"] and obj_type not in rule["valid_objects"]:
+                if obj_type and rule.get("valid_objects") and obj_type not in rule["valid_objects"]:
                     continue
 
             # Check evidence span if provided

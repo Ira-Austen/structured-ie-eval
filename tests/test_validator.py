@@ -66,6 +66,28 @@ class TestUnifiedValidator(unittest.TestCase):
         valid_rels = self.validator.validate_relations(self.sample_text, rels)
         self.assertEqual(len(valid_rels), 0, "Type violation should be rejected by validator!")
 
+    def test_resolve_endpoint_type_and_reject_person_org_parent_relation(self):
+        # Even if relation subject_type/object_type are empty in raw output,
+        # validator should look up matching entity types and reject Person -> Org parent_of
+        rels = [
+            DirectedRelation(
+                relation_id="r1",
+                relation_type="parent_of",
+                subject_id="",
+                subject_text="萧炎",
+                subject_type="",
+                object_id="",
+                object_text="萧家",
+                object_type=""
+            )
+        ]
+        ents = [
+            EntityMention("e1", "萧炎", "人物", 0, 2),
+            EntityMention("e2", "萧家", "组织", 3, 5)
+        ]
+        valid_rels = self.validator.validate_relations("萧炎属于萧家", rels, ents)
+        self.assertEqual(len(valid_rels), 0, "Person -> Organization parent_of must be rejected!")
+
     def test_deduplication(self):
         rels = [
             DirectedRelation(
