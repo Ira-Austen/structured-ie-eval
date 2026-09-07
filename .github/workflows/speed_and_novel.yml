@@ -1,0 +1,144 @@
+name: Speed Limit Optimization & Full Novel Benchmark
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_speed_limit:
+        description: "Run 6-tier Optimization Verification & Speed Limit Sweep"
+        required: true
+        type: boolean
+        default: true
+      run_full_novel:
+        description: "Run Full Novel End-to-End Extraction (No Cascade Filtering)"
+        required: true
+        type: boolean
+        default: true
+      max_chapters:
+        description: "Max chapters to extract (0 = all 1646 chapters, 100 = first 100 chapters)"
+        required: true
+        default: "100"
+      batch_size:
+        description: "Batch size for chunk extraction"
+        required: true
+        default: "16"
+      enable_int8:
+        description: "Enable INT8 Dynamic Quantization"
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  run_benchmarks:
+    name: Speed Limit Sweep & Full Novel Extraction
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Inspect Hardware & Vector Capabilities
+        run: |
+          echo "=== CPU Hardware & Vector Instructions ==="
+          lscpu | grep -E "Model name|Socket|Thread|NUMA|CPU\(s\)|Flags" || lscpu
+          echo "=== Memory Status ==="
+          free -h
+          echo "=== Cgroup v2 Info ==="
+          cat /sys/fs/cgroup/memory.max 2>/dev/null || true
+
+      - name: Install PyTorch CPU & GLiNER2 Dependencies
+        run: |
+          pip install --upgrade pip
+          pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -r requirements.txt
+          python -m unittest discover tests
+
+      - name: Run Optimization Verification & Speed Limit Sweep
+        if: ${{ github.event.inputs.run_speed_limit != 'false' }}
+        run: |
+          echo "Executing 6-tier Optimization Benchmark..."
+          python -m src.runner.run_speed_limit --max-chars 40000 --output-dir results
+
+      - name: Run Full Novel End-to-End Extraction
+        if: ${{ github.event.inputs.run_full_novel != 'false' }}
+        run: |
+          INT8_FLAG=""
+          if [ "${{ github.event.inputs.enable_int8 }}" = "true" ]; then
+            INT8_FLAG="--enable-int8"
+          fi
+          echo "Running Full Novel Extraction on max_chapters=${{ github.event.inputs.max_chapters }}..."
+          python -m src.runner.run_full_novel \
+            --max-chapters ${{ github.event.inputs.max_chapters }} \
+            --batch-size ${{ github.event.inputs.batch_size }} \
+            --threads 4 \
+            $INT8_FLAG \
+            --output-dir results
+
+      - name: Summarize Results to Step Summary
+        if: always()
+        run: |
+          echo "# 🚀 Speed Limit Optimization & Full Novel Benchmark Results" >> $GITHUB_STEP_SUMMARY
+          if [ -f "results/speed_limit_benchmark.json" ]; then
+            echo "## 📊 Optimization Verification (Speed Ceiling Sweep)" >> $GITHUB_STEP_SUMMARY
+            python -c '
+          import json
+          with open("results/speed_limit_benchmark.json") as f:
+              data = json.load(f)
+          print("| Optimization Tier | Batch Size | Threads | Chars/s | Latency (P50) | Speedup | Peak RAM |")
+          print("|---|---|---|---|---|---|---|")
+          for t in data["tiers"]:
+              print(f"| **{t[\"tier\"]}** | {t[\"batch_size\"]} | {t[\"threads\"]} | **{t[\"chars_per_sec\"]}** c/s | {t[\"latency_p50_ms\"]} ms | **{t[\"speedup\"]}x** | {t[\"peak_ram_mib\"]} MiB |")
+          ' >> $GITHUB_STEP_SUMMARY
+          fi
+
+          if [ -f "results/doupo_full_perf.json" ]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "## 📖 《斗破苍穹》端到端抽取性能 (无级联初筛)" >> $GITHUB_STEP_SUMMARY
+            python -c '
+          import json
+          with open("results/doupo_full_perf.json") as f:
+              data = json.load(f)
+          print(f"- **总处理字符量**: {data.get(\"total_novel_characters\", 0):,} 字符")
+          print(f"- **处理章节数**: {data.get(\"total_chapters\", 0)} 章")
+          print(f"- **总耗时**: {data.get(\"elapsed_seconds\", 0)} 秒 ({data.get(\"elapsed_minutes\", 0)} 分钟)")
+          print(f"- **平均吞吐**: **{data.get(\"average_throughput_chars_per_sec\", 0)} 字符/秒**")
+          print(f"- **峰值内存 (RSS)**: {data.get(\"peak_rss_mib\", 0)} MiB")
+          ' >> $GITHUB_STEP_SUMMARY
+          fi
+
+          if [ -f "results/doupo_full_kg_summary.json" ]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "## 🕸️ 知识图谱抽取成果概览" >> $GITHUB_STEP_SUMMARY
+            python -c '
+          import json
+          with open("results/doupo_full_kg_summary.json") as f:
+              data = json.load(f)
+          m = data.get("metrics", {})
+          print(f"- **独立实体总数**: {m.get(\"unique_entities_total\", 0)}")
+          print(f"- **人物**: {m.get(\"unique_characters\", 0)} | **势力门派**: {m.get(\"unique_organizations\", 0)} | **斗技技能**: {m.get(\"unique_skills\", 0)}")
+          print(f"- **关系三元组**: {m.get(\"unique_relations_triples\", 0)} | **战斗事件记录**: {m.get(\"total_battle_events\", 0)}")
+          print("\n### Top 10 人物榜")
+          for i, c in enumerate(data.get("top_characters", [])[:10], 1):
+              print(f"{i}. **{c[\"name\"]}** ({c[\"count\"]} 次登场)")
+          print("\n### Top 10 势力与门派")
+          for i, org in enumerate(data.get("top_organizations", [])[:10], 1):
+              print(f"{i}. **{org[\"name\"]}** ({org[\"count\"]} 次出现)")
+          print("\n### Top 10 斗技技能")
+          for i, sk in enumerate(data.get("top_skills", [])[:10], 1):
+              print(f"{i}. **{sk[\"name\"]}** ({sk[\"count\"]} 次使用)")
+          ' >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Upload Benchmark Artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: speed-and-novel-results
+          path: results/
+          retention-days: 14

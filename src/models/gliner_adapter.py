@@ -34,6 +34,7 @@ class GLiNERAdapter:
         self.joint_engine = None
         self.validator = UnifiedValidator()
         self.load_time_sec = 0.0
+        self._schema_cache = {}
 
     def load_model(self):
         from gliner2 import AutoExtractor
@@ -140,6 +141,32 @@ class GLiNERAdapter:
                     ))
                     ent_counter += 1
         return entities
+
+    def _parse_gliner_structures(self, raw_res: Dict[str, Any], prefix: str = "rec") -> List[EventRecord]:
+        records: List[EventRecord] = []
+        raw_structs = raw_res.get("structures", {}) or raw_res.get("structure", {})
+        rec_counter = 1
+        if isinstance(raw_structs, dict):
+            for event_name, inst_list in raw_structs.items():
+                if isinstance(inst_list, list):
+                    for inst in inst_list:
+                        if isinstance(inst, dict):
+                            anchor = inst.get("anchor", {})
+                            roles = {}
+                            for k, v in inst.items():
+                                if k != "anchor":
+                                    roles[k] = v.get("text", v) if isinstance(v, dict) else str(v)
+                            records.append(EventRecord(
+                                record_id=f"{prefix}_{rec_counter}",
+                                event_type=event_name,
+                                anchor_id="",
+                                anchor_text=anchor.get("text", "") if isinstance(anchor, dict) else str(anchor),
+                                roles=roles,
+                                polarity="positive",
+                                modality="actual"
+                            ))
+                            rec_counter += 1
+        return records
 
     def _parse_gliner_relations(self, raw_res: Dict[str, Any], prefix: str = "r") -> List[DirectedRelation]:
         relations: List[DirectedRelation] = []
@@ -442,3 +469,150 @@ class GLiNERAdapter:
             status="COMPLETED"
         )
         return self.validator.validate_result(combined)
+
+    def get_unified_schema(self, schema_type: str = "novel"):
+        """Get or build cached unified schema containing entities, relations, and structures."""
+        if schema_type in self._schema_cache:
+            return self._schema_cache[schema_type]
+
+        schema = self.extractor.create_schema()
+        if schema_type == "novel":
+            schema = schema.entities({
+                "人物": "小说中登场的人物姓名或称谓，如萧炎、萧战、药老、萧宁",
+                "组织": "家族、宗门或势力名称，如萧家、云岚宗",
+                "境界": "修炼境界等级，如斗者、大斗师、五星大斗师",
+                "技能": "斗技名称，如裂爪击、吸掌",
+                "物品": "丹药、宝物或器物，如聚气散、古玉盒子",
+                "地点": "地名或特定场所，如乌坦城、训练场"
+            })
+            schema = schema.relations({
+                "亲属关系": {"threshold": 0.4},
+                "师徒关系": {"threshold": 0.4},
+                "所属势力": {"threshold": 0.4}
+            })
+            try:
+                schema = schema.structure("战斗记录", mode="natural", anchor="攻击者") \
+                    .field("攻击者", dtype="str") \
+                    .field("防御者", dtype="str", cardinality="required_one") \
+                    .field("技能", dtype="str", cardinality="optional_one") \
+                    .field("战斗结果", dtype="str", cardinality="optional_one")
+            except Exception:
+                pass
+        else:
+            schema = schema.entities({
+                "人物": "人员姓名",
+                "公司": "企业或公司法人名称",
+                "组织": "部门或机构名称",
+                "金额": "交易金额或资金数字",
+                "物品": "货物或商品名称",
+                "地点": "配送地址或履行地点"
+            })
+            schema = schema.relations({
+                "任职关系": {"threshold": 0.4},
+                "持股关系": {"threshold": 0.4},
+                "交易关系": {"threshold": 0.4},
+                "交付关系": {"threshold": 0.4}
+            })
+        self._schema_cache[schema_type] = schema
+        return schema
+
+    def predict_unified(self, sample_id: str, text: str, schema_type: str = "novel") -> ExtractionResult:
+        """Single-pass integrated extraction with unified schema."""
+        if self.extractor is None:
+            self.load_model()
+
+        t0 = time.time()
+        proc = psutil.Process(os.getpid())
+        schema = self.get_unified_schema(schema_type)
+
+        raw_res = self.extractor.extract(
+            text,
+            schema,
+            threshold=0.4,
+            include_spans=True,
+            include_confidence=True
+        )
+
+        entities = self._parse_gliner_entities(raw_res, prefix="uni_e")
+        relations = self._parse_gliner_relations(raw_res, prefix="uni_r")
+        records = self._parse_gliner_structures(raw_res, prefix="uni_rec")
+
+        res = ExtractionResult(
+            sample_id=sample_id,
+            model_name=self.model_name,
+            config_id="G5_UNIFIED",
+            text=text,
+            entities=entities,
+            relations=relations,
+            records=records,
+            raw_output=raw_res,
+            status="COMPLETED"
+        )
+        validated = self.validator.validate_result(res)
+        validated.execution_time_sec = round(time.time() - t0, 4)
+        validated.peak_memory_mib = round(proc.memory_info().rss / (1024.0 * 1024.0), 2)
+        return validated
+
+    def batch_predict_unified(
+        self,
+        sample_ids: List[str],
+        texts: List[str],
+        schema_type: str = "novel",
+        batch_size: int = 8,
+        num_workers: int = 0
+    ) -> List[ExtractionResult]:
+        """Batched single-pass extraction across multiple texts."""
+        if self.extractor is None:
+            self.load_model()
+
+        t0 = time.time()
+        proc = psutil.Process(os.getpid())
+        schema = self.get_unified_schema(schema_type)
+
+        raw_results = self.extractor.batch_extract(
+            texts,
+            schema,
+            batch_size=batch_size,
+            threshold=0.4,
+            num_workers=num_workers,
+            include_spans=True,
+            include_confidence=True
+        )
+
+        results = []
+        for sid, txt, raw in zip(sample_ids, texts, raw_results):
+            entities = self._parse_gliner_entities(raw, prefix="b_e")
+            relations = self._parse_gliner_relations(raw, prefix="b_r")
+            records = self._parse_gliner_structures(raw, prefix="b_rec")
+            res = ExtractionResult(
+                sample_id=sid,
+                model_name=self.model_name,
+                config_id="G5_UNIFIED_BATCH",
+                text=txt,
+                entities=entities,
+                relations=relations,
+                records=records,
+                raw_output=raw,
+                status="COMPLETED"
+            )
+            val = self.validator.validate_result(res)
+            val.execution_time_sec = round((time.time() - t0) / max(len(texts), 1), 4)
+            val.peak_memory_mib = round(proc.memory_info().rss / (1024.0 * 1024.0), 2)
+            results.append(val)
+        return results
+
+    def enable_dynamic_quantization(self) -> bool:
+        """Apply PyTorch INT8 dynamic quantization to Linear layers for high CPU throughput."""
+        if self.extractor is None:
+            self.load_model()
+        try:
+            import torch.ao.quantization as ao_quant
+            self.extractor = ao_quant.quantize_dynamic(
+                self.extractor,
+                {torch.nn.Linear},
+                dtype=torch.qint8
+            )
+            return True
+        except Exception as e:
+            print(f"[Warning] Failed to enable INT8 dynamic quantization: {e}")
+            return False
