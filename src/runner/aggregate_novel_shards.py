@@ -8,11 +8,50 @@ import os
 import sys
 import glob
 import json
+import re
 import argparse
 from collections import Counter, defaultdict
 from typing import List, Dict, Any, Set, Tuple
 
-from .run_full_novel import load_novel_chapters
+
+def load_novel_chapters(file_path: str, max_chapters: int = 0) -> List[Dict[str, Any]]:
+    """Parse novel file into structured chapters (pure standard library)."""
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"Novel file not found at: {file_path}")
+
+    with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+        text = f.read()
+
+    pattern = re.compile(r'(第[0-9一二三四五六七八九十百千万]+章[^\n\r]*)')
+    splits = pattern.split(text)
+
+    chapters = []
+    # If the text starts before chapter 1 (intro/prologue)
+    if splits and not pattern.match(splits[0]) and len(splits[0].strip()) > 100:
+        body = splits[0].strip()
+        chapters.append({
+            "chapter_idx": 0,
+            "title": "作品前言与背景设定",
+            "text": body,
+            "char_length": len(body)
+        })
+
+    chapter_counter = 1
+    for i in range(1, len(splits), 2):
+        title = splits[i].strip()
+        body = splits[i+1].strip() if i+1 < len(splits) else ""
+        chapters.append({
+            "chapter_idx": chapter_counter,
+            "title": title,
+            "text": body,
+            "char_length": len(body)
+        })
+        chapter_counter += 1
+
+    if max_chapters > 0:
+        chapters = chapters[:max_chapters]
+
+    return chapters
 
 
 DATA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "data"))
